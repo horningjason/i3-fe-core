@@ -40,3 +40,9 @@ coverage.xml
 # OS
 .DS_Store
 Thumbs.db
+
+# TLS / JWS keys and certs — never commit
+*.pem
+*.key
+*.crt
+*.p12
