@@ -7,7 +7,7 @@ name = "i3-fe-core"
 version = "0.1.0"
 description = "Core library for NENA i3 Functional Elements (NENA-STA-010.3f-2021)"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 dependencies = [
     "pydantic>=2.0",
     "python-dotenv>=1.0",
