@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "i3-fe-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "Core library for NENA i3 Functional Elements (NENA-STA-010.3f-2021)"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
