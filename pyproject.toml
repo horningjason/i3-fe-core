@@ -17,6 +17,7 @@ dependencies = [
     "gunicorn>=22.0",
     "ntplib>=0.4",
     "cryptography>=42.0",
+    "prometheus_client>=0.20",
 ]
 
 [project.optional-dependencies]

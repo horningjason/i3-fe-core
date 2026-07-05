@@ -47,6 +47,13 @@ query/response — validation results are returned as part of a
 short; a conformant LVF must implement the LoST XML schema, not this shape.
 It has no security posture requirement of its own.
 
+> **Two ways to consume core.** `create_app()` below is the **framework quick-start**:
+> core owns the app and you hand it routes — the fastest on-ramp for a greenfield FE.
+> Alternatively, use the **library pattern**: keep your own app and wire core à la carte
+> (`SipNotifier`, `DiscrepancyReporting`, the state notifiers, `NtpClient`) into your own
+> container. Both are supported; pick the library pattern when you already have an app or
+> want looser coupling.
+
 ### `lvf/identity.py`
 
 ```python
