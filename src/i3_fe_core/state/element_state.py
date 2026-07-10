@@ -18,10 +18,14 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from i3_fe_core.config.identity import ElementIdentity
+from i3_fe_core.logging.logevent import ElementStateChangeLogEvent
 from i3_fe_core.state.store import ElementState, ElementStateBundle, StateStore
+
+if TYPE_CHECKING:
+    from i3_fe_core.logging.logging_client import LoggingClient
 
 _log = logging.getLogger(__name__)
 
@@ -66,16 +70,23 @@ class ElementStateNotifier:
         identity: ElementIdentity,
         store: StateStore,
         min_notify_interval: float = 0.0,
+        logging_client: "LoggingClient | None" = None,
     ) -> None:
         """
         Args:
             identity:             FE identity; element_id populates the NOTIFY body.
             store:                StateStore holding the authoritative current state.
             min_notify_interval:  RFC 6446 minimum seconds between NOTIFYs (0 = off).
+            logging_client:       Optional LoggingClient. When set, an
+                                  ElementStateChangeLogEvent (§4.12.3) is emitted on
+                                  every NOTIFY dispatch. When None (default), no
+                                  logging occurs — behavior is unchanged from before
+                                  this parameter existed.
         """
         self._identity = identity
         self._store = store
         self._min_interval = min_notify_interval
+        self._logging_client = logging_client
         self._callbacks: list[Callable[[dict[str, Any]], None]] = []
         # Monotonic reference for last dispatch; 0.0 ensures first notify is always immediate.
         self._last_notify_mono: float = 0.0
@@ -163,6 +174,16 @@ class ElementStateNotifier:
     def _dispatch_notify(self) -> None:
         self._last_notify_mono = time.monotonic()
         body = self.get_notify_body()
+        if self._logging_client is not None:
+            event = ElementStateChangeLogEvent(
+                notification_contents=body,
+                state_change_notification_contents=body,
+                direction="outgoing",
+            )
+            try:
+                self._logging_client.emit_nowait(event)
+            except Exception:
+                _log.exception("ElementStateChangeLogEvent emission failed")
         for cb in self._callbacks:
             try:
                 cb(body)

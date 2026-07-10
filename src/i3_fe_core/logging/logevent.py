@@ -138,3 +138,77 @@ def prologue_to_dict(event: LogEventPrologue) -> dict[str, Any]:
             value = format_i3(value)
         result[to_i3_json_key(f.name)] = value
     return result
+
+
+# ---------------------------------------------------------------------------
+# FE-generic LogEvent subtypes (§4.12.3)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ElementStateChangeLogEvent(LogEventPrologue):
+    """§4.12.3 — logged when an element sends/receives an ElementState
+    change notification. affected_element_id is OPTIONAL (omit) when the
+    emitting element is itself the element whose state changed."""
+
+    log_event_type: str = "ElementStateChangeLogEvent"
+    notification_contents: dict[str, Any] | None = None
+    state_change_notification_contents: dict[str, Any] | None = None
+    affected_element_id: str | None = None
+    direction: str | None = None            # "incoming" | "outgoing"
+
+
+@dataclass
+class ServiceStateChangeLogEvent(LogEventPrologue):
+    """§4.12.3 — logged when a Service sends/receives a ServiceState
+    change (including Security Posture)."""
+
+    log_event_type: str = "ServiceStateChangeLogEvent"
+    new_state: str | None = None
+    new_security_posture: str | None = None
+    affected_service_identifier: str | None = None
+    direction: str | None = None            # "incoming" | "outgoing"
+
+
+@dataclass
+class SubscribeLogEvent(LogEventPrologue):
+    """§4.12.3 — logged for every processed SUBSCRIBE on any defined
+    Event Package. subscription_id correlates transactions on one
+    subscription (urn:emergency:uid:subid:<globally-unique-id>)."""
+
+    log_event_type: str = "SubscribeLogEvent"
+    package: str | None = None
+    peer: str | None = None
+    parameter: list[dict[str, Any]] | None = None
+    expiration: str | None = None
+    response: int | None = None
+    purpose: str | None = None              # "initial" | "refresh" | "terminate"
+    direction: str | None = None            # "incoming" | "outgoing"
+    subscription_id: str | None = None
+
+
+@dataclass
+class DiscrepancyReportLogEvent(LogEventPrologue):
+    """§4.12.3 — logged by any element that sends/receives a Discrepancy
+    Report or an update to one. `type` is the DR web-service function name
+    (DiscrepancyReportRequest, DiscrepancyResolution, etc.). The field is
+    named `type` deliberately so it serializes to the STA-010 "type"
+    member."""
+
+    log_event_type: str = "DiscrepancyReportLogEvent"
+    contents: dict[str, Any] | None = None
+    type: str | None = None
+    direction: str | None = None            # "incoming" | "outgoing"
+
+
+@dataclass
+class VersionsLogEvent(LogEventPrologue):
+    """§4.12.3 — logged by an FE for the Versions response it RECEIVES for
+    a Versions request it issued (client side), on the initial request or
+    when the response changes. Dormant generic type: the Versions
+    entrypoint does NOT emit this on inbound calls; client-side emission
+    is wired by the consuming FE. `contents` carries the received Versions
+    response body (including the code-set fingerprint)."""
+
+    log_event_type: str = "VersionsLogEvent"
+    contents: dict[str, Any] | None = None
+    direction: str | None = None            # "incoming"

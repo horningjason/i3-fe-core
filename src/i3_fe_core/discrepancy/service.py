@@ -42,7 +42,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -53,7 +53,11 @@ from i3_fe_core.discrepancy.models import (
     DiscrepancyResolution,
     StatusUpdate,
 )
+from i3_fe_core.logging.logevent import DiscrepancyReportLogEvent
 from i3_fe_core.time.timestamps import format_i3, now_i3
+
+if TYPE_CHECKING:
+    from i3_fe_core.logging.logging_client import LoggingClient
 
 _log = logging.getLogger(__name__)
 
@@ -145,6 +149,11 @@ class DiscrepancyReporting:
                              between submissions sharing a similarity key.
         agent_id:            Optional reportingAgentId/respondingAgentId.
                              Defaults to identity.agent_id.
+        logging_client:      Optional LoggingClient. When set, a
+                             DiscrepancyReportLogEvent (§4.12.3) is emitted for
+                             every DR sent, received, or updated
+                             (Status/Resolution). When None (default), no
+                             logging occurs.
     """
 
     def __init__(
@@ -160,6 +169,7 @@ class DiscrepancyReporting:
         estimated_return_window_s: float = 72 * 3600.0,
         min_similar_report_interval: float = 600.0,
         agent_id: str | None = None,
+        logging_client: "LoggingClient | None" = None,
     ) -> None:
         self._identity = identity
         self._jcard = contact_jcard if contact_jcard is not None else _default_jcard(identity)
@@ -171,6 +181,7 @@ class DiscrepancyReporting:
         self._return_window_s = estimated_return_window_s
         self._min_similar_interval = min_similar_report_interval
         self._agent_id = agent_id if agent_id is not None else identity.agent_id
+        self._logging_client = logging_client
 
         # Responding role: DRs filed against us, keyed per §3.7.2/§3.7.3 by
         # (reportingAgencyName, discrepancyReportId) — the id is only unique
@@ -244,6 +255,16 @@ class DiscrepancyReporting:
             responding_agent_id=self._agent_id,
             response_estimated_return_time=estimated,
         )
+        if self._logging_client is not None:
+            log_event = DiscrepancyReportLogEvent(
+                contents=report.to_dict(),
+                type="DiscrepancyReportRequest",
+                direction="incoming",
+            )
+            try:
+                await self._logging_client.emit(log_event)
+            except Exception:
+                _log.exception("DiscrepancyReportLogEvent emission failed (receive_report)")
         return 201, response.to_dict()
 
     # ------------------------------------------------------------------
@@ -341,6 +362,16 @@ class DiscrepancyReporting:
                 "DR %s resolution call-back to %s failed; "
                 "reporter can still poll GET .../Resolutions", key, callback,
             )
+        if self._logging_client is not None:
+            log_event = DiscrepancyReportLogEvent(
+                contents=res.to_dict(),
+                type="DiscrepancyResolution",
+                direction="outgoing",
+            )
+            try:
+                await self._logging_client.emit(log_event)
+            except Exception:
+                _log.exception("DiscrepancyReportLogEvent emission failed (resolve)")
         return res
 
     # ------------------------------------------------------------------
@@ -419,6 +450,18 @@ class DiscrepancyReporting:
             resp = await self._client().post(url, json=report.to_dict())
         except httpx.HTTPError:
             _log.exception("DR %s submission to %s failed", report.discrepancy_report_id, url)
+            if self._logging_client is not None:
+                log_event = DiscrepancyReportLogEvent(
+                    contents=report.to_dict(),
+                    type="DiscrepancyReportRequest",
+                    direction="outgoing",
+                )
+                try:
+                    await self._logging_client.emit(log_event)
+                except Exception:
+                    _log.exception(
+                        "DiscrepancyReportLogEvent emission failed (submit/transport-error)"
+                    )
             return SubmitResult(status_code=None, response=None)
 
         self._last_similar_send[key] = now_mono
@@ -440,6 +483,16 @@ class DiscrepancyReporting:
                 "DR %s submission to %s returned %d",
                 report.discrepancy_report_id, url, resp.status_code,
             )
+        if self._logging_client is not None:
+            log_event = DiscrepancyReportLogEvent(
+                contents=report.to_dict(),
+                type="DiscrepancyReportRequest",
+                direction="outgoing",
+            )
+            try:
+                await self._logging_client.emit(log_event)
+            except Exception:
+                _log.exception("DiscrepancyReportLogEvent emission failed (submit)")
         return SubmitResult(status_code=resp.status_code, response=parsed)
 
     # ------------------------------------------------------------------
@@ -469,6 +522,16 @@ class DiscrepancyReporting:
             "DR %s resolved by %s: %s",
             res.discrepancy_report_id, res.responding_agency_name, res.resolution,
         )
+        if self._logging_client is not None:
+            log_event = DiscrepancyReportLogEvent(
+                contents=res.to_dict(),
+                type="DiscrepancyResolution",
+                direction="incoming",
+            )
+            try:
+                self._logging_client.emit_nowait(log_event)
+            except Exception:
+                _log.exception("DiscrepancyReportLogEvent emission failed (receive_resolution)")
         return 201, None
 
     # ------------------------------------------------------------------

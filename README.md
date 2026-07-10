@@ -22,6 +22,9 @@ config).
 | `i3_fe_core.runtime` | — | Worker model, leader gate |
 | `i3_fe_core.app` | — | Application factory, lifecycle |
 | `i3_fe_core.conformance` | — | Pytest conformance helpers |
+| `i3_fe_core.gis` | — | Mtime-keyed dataset cache + hot-reload for file-backed data (e.g. GIS layers) |
+| `i3_fe_core.observability` | — | Prometheus multiprocess metrics plumbing |
+| `i3_fe_core.testing` | NG-SEC NENA-STA-040.2-2024 §6.23.8, §6.9 | Test-only self-signed credential helper, kept out of production import paths |
 
 ---
 

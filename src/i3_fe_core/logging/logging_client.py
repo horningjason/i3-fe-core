@@ -30,6 +30,7 @@ See notify/sip_notifier.py for the full note.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging as _stdlib_logging
 from collections.abc import Callable
@@ -91,19 +92,23 @@ class LoggingClient:
         self._logging_service_uri = logging_service_uri
         self._http_client = http_client or httpx.AsyncClient()
         self._sign_payload = sign_payload
+        # Holds references to fire-and-forget POST tasks scheduled by
+        # emit_nowait() so they are not garbage-collected mid-flight.
+        self._bg_tasks: set[asyncio.Task[Any]] = set()
 
-    async def emit(self, event: LogEventPrologue) -> dict[str, Any]:
-        """Stamp infrastructure fields, serialise, emit to stdlib logging, and POST.
+    def _stamp_serialize_log(self, event: LogEventPrologue) -> dict[str, Any]:
+        """Populate infrastructure prologue fields, serialise, and emit to
+        stdlib logging.  Shared by emit() and emit_nowait().
 
         Steps:
-          1. Populate ``elementId``, ``agencyId`` from the injected identity.
-          2. Stamp ``timestamp`` from ``now_i3()`` (overrides any caller-set value).
-          3. Warn (but still emit) when agencyId is empty — MANDATORY per §4.12.3.1.
-          4. Serialise to camelCase JSON dict.
-          5. Emit via stdlib logging (always).
-          6. POST to Logging Service when ``logging_service_uri`` is configured.
+          1. Populate elementId, agencyId from the injected identity.
+          2. Stamp timestamp from now_i3() (overrides any caller-set value).
+          3. Warn (but still emit) when agencyId is empty — MANDATORY per
+             §4.12.3.1.
+          4. Serialise to a camelCase JSON dict.
+          5. Emit via stdlib logging.
 
-        Returns the serialised body dict (useful for callers / tests).
+        Returns the serialised body dict.
         """
         event.element_id = self._identity.element_id
         event.agency_id = self._identity.agency_id
@@ -119,9 +124,53 @@ class LoggingClient:
 
         body = prologue_to_dict(event)
         _log.info("LogEvent: %s", json.dumps(body, ensure_ascii=False))
+        return body
 
+    async def emit(self, event: LogEventPrologue) -> dict[str, Any]:
+        """Stamp infrastructure fields, serialise, emit to stdlib logging, and
+        POST to the Logging Service when a logging_service_uri is configured.
+
+        Returns the serialised body dict (useful for callers / tests).
+        """
+        body = self._stamp_serialize_log(event)
         if self._logging_service_uri:
             await self._post(body)
+        return body
+
+    def emit_nowait(self, event: LogEventPrologue) -> dict[str, Any]:
+        """Synchronous, non-blocking counterpart to emit().
+
+        For emission sites that are themselves synchronous and must not block
+        (ElementState/ServiceState dispatch, SUBSCRIBE handling, DR resolution
+        receipt).  Stamps, serialises, and emits to stdlib logging exactly as
+        emit() does — always, synchronously.
+
+        The HTTP POST to the Logging Service is best-effort:
+          - When an asyncio event loop is running, the POST is scheduled as a
+            background task (fire-and-forget); a reference is held until the
+            task completes so it is not garbage-collected mid-flight.
+          - When no loop is running (synchronous / test context), the POST is
+            skipped with a debug log — the event is still emitted to stdlib
+            logging.  This mirrors the "no running loop → degrade gracefully"
+            fallback used by the state notifiers and SipNotifier.
+
+        Returns the serialised body dict.
+        """
+        body = self._stamp_serialize_log(event)
+
+        if self._logging_service_uri:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                _log.debug(
+                    "emit_nowait: no running event loop — POST of LogEvent "
+                    "type=%r skipped (event still logged to stdlib logging)",
+                    event.log_event_type,
+                )
+            else:
+                task = loop.create_task(self._post(body))
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
 
         return body
 

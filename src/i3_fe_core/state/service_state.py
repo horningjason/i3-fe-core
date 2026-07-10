@@ -28,8 +28,9 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from i3_fe_core.logging.logevent import ServiceStateChangeLogEvent
 from i3_fe_core.state.store import (
     SecurityPosture,
     SecurityPostureBundle,
@@ -37,6 +38,9 @@ from i3_fe_core.state.store import (
     ServiceStateBundle,
     StateStore,
 )
+
+if TYPE_CHECKING:
+    from i3_fe_core.logging.logging_client import LoggingClient
 
 _log = logging.getLogger(__name__)
 
@@ -101,6 +105,7 @@ class ServiceStateNotifier:
         min_notify_interval: float = 0.0,
         supports_security_posture: bool = False,
         initial_security_posture: SecurityPosture = SecurityPosture.GREEN,
+        logging_client: "LoggingClient | None" = None,
     ) -> None:
         """
         Args:
@@ -119,6 +124,11 @@ class ServiceStateNotifier:
                                        An FE opting into security-posture tracking SHOULD
                                        pass its real starting state so the first NOTIFY
                                        carries a deliberate value rather than a hidden default.
+            logging_client:            Optional LoggingClient. When set, a
+                                       ServiceStateChangeLogEvent (§4.12.3) is emitted on
+                                       every NOTIFY dispatch. When None (default), no
+                                       logging occurs — behavior is unchanged from before
+                                       this parameter existed.
         """
         if service_id is not None and service_id != domain:
             raise ValueError(
@@ -132,6 +142,7 @@ class ServiceStateNotifier:
         self._store = store
         self._min_interval = min_notify_interval
         self._supports_security_posture = supports_security_posture
+        self._logging_client = logging_client
         self._callbacks: list[Callable[[dict[str, Any]], None]] = []
         # Monotonic reference for last dispatch; 0.0 ensures first notify is immediate.
         self._last_notify_mono: float = 0.0
@@ -295,6 +306,21 @@ class ServiceStateNotifier:
     def _dispatch_notify(self) -> None:
         self._last_notify_mono = time.monotonic()
         body = self.get_notify_body()
+        if self._logging_client is not None:
+            bundle = self._store.get_service_state()
+            new_security_posture = None
+            if self._supports_security_posture and bundle.security_posture is not None:
+                new_security_posture = bundle.security_posture.posture.value
+            event = ServiceStateChangeLogEvent(
+                new_state=bundle.state.value,
+                new_security_posture=new_security_posture,
+                affected_service_identifier=self._domain,
+                direction="outgoing",
+            )
+            try:
+                self._logging_client.emit_nowait(event)
+            except Exception:
+                _log.exception("ServiceStateChangeLogEvent emission failed")
         for cb in self._callbacks:
             try:
                 cb(body)

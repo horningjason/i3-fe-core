@@ -54,10 +54,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from i3_fe_core.logging.logevent import SubscribeLogEvent
 from i3_fe_core.runtime.worker import WorkerContext
 from i3_fe_core.state.element_state import (
     EVENT_PACKAGE_NAME as ELEMENT_EVENT_PACKAGE,
@@ -69,6 +71,9 @@ from i3_fe_core.state.service_state import (
     NOTIFY_MIME_TYPE as SERVICE_MIME_TYPE,
     ServiceStateNotifier,
 )
+
+if TYPE_CHECKING:
+    from i3_fe_core.logging.logging_client import LoggingClient
 
 _log = logging.getLogger(__name__)
 
@@ -98,6 +103,7 @@ class SipSubscription:
     call_id: str               # SIP Call-ID (primary key in subscriptions dict)
     expires_at: float          # time.monotonic() absolute expiry
     min_notify_interval: float = 0.0  # RFC 6446 minimum interval in seconds
+    subscription_id: str = ""  # §4.12.3 SubscribeLogEvent correlation id
 
     # Runtime state — not part of __init__ signature.
     last_notify_mono: float = field(default=0.0, compare=False)
@@ -163,6 +169,7 @@ class SipNotifier:
         max_subscriptions: int = DEFAULT_MAX_SUBSCRIPTIONS,
         authorize_subscriber: Callable[[SipSubscribeRequest], bool] | None = None,
         validate_target_uri: Callable[[str], bool] | None = None,
+        logging_client: "LoggingClient | None" = None,
     ) -> None:
         """
         Args:
@@ -179,6 +186,10 @@ class SipNotifier:
                                   reject with 403 before any subscription is
                                   stored or NOTIFY dispatched (prevents NOTIFY
                                   redirection/amplification to arbitrary targets).
+            logging_client:       Optional LoggingClient. When set, a
+                                  SubscribeLogEvent (§4.12.3) is emitted for every
+                                  processed SUBSCRIBE (accepted or rejected). When
+                                  None (default), no logging occurs.
 
         When NEITHER hook is provided, SUBSCRIBEs are accepted as before, but a
         one-time WARNING is logged: §5.4 mutual authentication must then be
@@ -191,6 +202,7 @@ class SipNotifier:
         self._max_subscriptions = max_subscriptions
         self._authorize_subscriber = authorize_subscriber
         self._validate_target_uri = validate_target_uri
+        self._logging_client = logging_client
         self._unguarded_subscribe_warned = False
         self._subscriptions: dict[str, SipSubscription] = {}
         self._cleanup_task: asyncio.Task[None] | None = None
@@ -258,9 +270,19 @@ class SipNotifier:
           503 Service Unavailable — subscription capacity reached (new Call-IDs only;
                                     refreshes of existing subscriptions still succeed)
         """
+        existing_sub = self._subscriptions.get(request.call_id)
+        existing_before = existing_sub is not None
+        purpose = "refresh" if existing_before else "initial"
+        subscription_id = (
+            existing_sub.subscription_id
+            if existing_sub is not None
+            else f"urn:emergency:uid:subid:{uuid.uuid4()}"
+        )
+
         # Validate event package.
         valid = {ELEMENT_EVENT_PACKAGE, SERVICE_EVENT_PACKAGE}
         if request.event_package not in valid:
+            self._log_subscribe(request, 489, purpose, subscription_id)
             return SipResponse(
                 status_code=489,
                 reason=f"Bad Event: {request.event_package!r} is not a recognised package",
@@ -290,6 +312,7 @@ class SipNotifier:
                     request.subscriber_uri,
                     request.call_id,
                 )
+                self._log_subscribe(request, 403, purpose, subscription_id)
                 return SipResponse(status_code=403, reason="Forbidden")
             if self._validate_target_uri is not None and not self._validate_target_uri(
                 request.subscriber_uri
@@ -300,6 +323,7 @@ class SipNotifier:
                     request.subscriber_uri,
                     request.call_id,
                 )
+                self._log_subscribe(request, 403, purpose, subscription_id)
                 return SipResponse(status_code=403, reason="Forbidden")
 
         # Expires == 0 → explicit unsubscribe.
@@ -307,6 +331,7 @@ class SipNotifier:
             removed = self._subscriptions.pop(request.call_id, None)
             if removed and removed._timer_handle:
                 removed._timer_handle.cancel()
+            self._log_subscribe(request, 200, "terminate", subscription_id)
             return SipResponse(status_code=200, reason="OK", expires=0)
 
         # Negotiate duration.
@@ -316,6 +341,7 @@ class SipNotifier:
             else DEFAULT_SUBSCRIPTION_SECONDS
         )
         if requested < MIN_SUBSCRIPTION_SECONDS:
+            self._log_subscribe(request, 423, purpose, subscription_id)
             return SipResponse(
                 status_code=423,
                 reason="Interval Too Brief",
@@ -333,6 +359,7 @@ class SipNotifier:
                 "SUBSCRIBE rejected: subscription capacity (%d) reached",
                 self._max_subscriptions,
             )
+            self._log_subscribe(request, 503, purpose, subscription_id)
             return SipResponse(
                 status_code=503,
                 reason="Service Unavailable: subscription capacity reached",
@@ -344,6 +371,7 @@ class SipNotifier:
             call_id=request.call_id,
             expires_at=time.monotonic() + negotiated,
             min_notify_interval=request.min_notify_interval,
+            subscription_id=subscription_id,
         )
         # Cancel old timer if refreshing an existing subscription.
         old = self._subscriptions.get(request.call_id)
@@ -354,6 +382,7 @@ class SipNotifier:
         # §2.4.1 / §2.4.2: send an initial NOTIFY with the current state.
         self._send_current_state_notify(sub)
 
+        self._log_subscribe(request, 200, purpose, subscription_id)
         return SipResponse(status_code=200, reason="OK", expires=negotiated)
 
     # ------------------------------------------------------------------
@@ -365,6 +394,33 @@ class SipNotifier:
 
     def _on_service_state(self, body: dict[str, Any]) -> None:
         self._fan_out(SERVICE_EVENT_PACKAGE, body, SERVICE_MIME_TYPE)
+
+    def _log_subscribe(
+        self,
+        request: "SipSubscribeRequest",
+        status_code: int,
+        purpose: str,
+        subscription_id: str,
+    ) -> None:
+        """Emit a SubscribeLogEvent (§4.12.3) if a logging_client is set."""
+        if self._logging_client is None:
+            return
+        event = SubscribeLogEvent(
+            package=request.event_package,
+            peer=request.subscriber_uri,
+            parameter=None,
+            expiration=(
+                str(request.expires) if request.expires is not None else None
+            ),
+            response=status_code,
+            purpose=purpose,
+            direction="incoming",
+            subscription_id=subscription_id,
+        )
+        try:
+            self._logging_client.emit_nowait(event)
+        except Exception:
+            _log.exception("SubscribeLogEvent emission failed")
 
     # ------------------------------------------------------------------
     # Fan-out
